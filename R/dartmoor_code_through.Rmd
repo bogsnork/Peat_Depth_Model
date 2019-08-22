@@ -71,7 +71,7 @@ slope <- raster("../data/predictor_stack.tif", band = 3)
 create raster stack
 ```{r}
 predictors <- stack(elev, aspect, slope)
-names(predictors) <- c("ELEVATION", "ASPECT", "SLOPE")
+names(predictors) <- c("elev", "aspect", "slope")
 plot(predictors)
 ```
 
@@ -80,7 +80,7 @@ plot(predictors)
 predictors.sp <- rasterToPoints(x = predictors, spatial = TRUE)
 crs(predictors.sp) <- crs(data.sp)
 spplot(predictors.sp)
-spplot(predictors.sp["ASPECT"])
+spplot(predictors.sp["elev"])
 ```
 
 
@@ -105,9 +105,34 @@ proj4 <- "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-1000
 
 input.data.sp <- sp::SpatialPointsDataFrame(data = input.data, coords = coords, proj4string = CRS(proj4))
 
+
 spplot(input.data.sp)
 ```
 
+```{r}
+mapdata <- data.frame(input.data.sp@data, input.data.sp@coords)
+head(mapdata)
+```
+
+```{r}
+ggplot(mapdata, aes(x = X, y = Y)) +
+  geom_point(aes(colour = peat_depth))+
+  labs(title = "Peat depth spatial distribution")
+```
+
+```{r}
+ggplot(mapdata, aes(x = elev, y = slope)) +
+  geom_point(aes(colour = peat_depth))+
+  labs(title = "Peat depth: elevation by slope")
+```
+
+```{r}
+ggplot(mapdata, aes(x = aspect, y = peat_depth)) +
+  geom_point(aes(colour = peat_depth))+
+  coord_polar() +
+  labs(title = "Peat depth by aspect")
+
+```
 
 
 ##Interpolate
@@ -124,16 +149,18 @@ spplot(peatdepth.idw["var1.pred"], main = "peat depth inverse distance weighted 
 ```
 
 
+
 ### Variograms
 ```{r}
-# logPD.vgm = variogram(log(peat)depth~1, input.data.sp)
-# logPD.vgm
-# logPD.fit = fit.variogram(logPD.vgm, model = vgm(1, "Sph", 900, 1))
-# logPD.fit
-# plot(logPD.vgm, logPD.fit)
+#log of peat depth plus one
+logPD.vgm = variogram(log(peat_depth+1)~1, input.data.sp)
+logPD.vgm
+logPD.fit = fit.variogram(logPD.vgm, model = vgm(1, "Sph", 900, 1))
+logPD.fit
+plot(logPD.vgm, logPD.fit)
 ```
 
-NOT LOOKING GOOD, TRY WITHOUT LOG
+
 
 ```{r}
 PD.vgm = variogram(peat_depth ~1, input.data.sp)
@@ -148,18 +175,8 @@ plot(PD.vgm, PD.fit.mat)
 
 
 
-
-
-
-
-
-
-
 Instead of the constant mean, denoted by \verb|~1|, we can specify a
 mean function, e.g. using \verb|~sqrt(dist)| as a predictor variable:
-
-
-
 
 ```{r}
 PD.regr.vgm = variogram(peat_depth ~ slope + elev, input.data.sp)
@@ -187,36 +204,13 @@ ggplot(PD.vgm.comp, aes(x = distance, y = semivariance))+
   geom_point(aes(shape = covariate))
 ```
 
-##########################################
-##from here on I'm using a different source for the input data - need to change that to the one that matches the predictor layers (i.e. input.data.sp not data.sp)
-
 ```{r}
-PD.vgm.comp = rbind(data.frame(variogram(PEAT_DEPTH ~ 1, data.sp), covariate = "none"),
-                    data.frame(variogram(PEAT_DEPTH ~ SLOPE, data.sp), covariate = "slope"),
-                    data.frame(variogram(PEAT_DEPTH ~ ELEVATION, data.sp), covariate = "elev"),
-                    data.frame(variogram(PEAT_DEPTH ~ consdryday, data.sp), covariate = "drydays"),
-                    data.frame(variogram(PEAT_DEPTH ~ LCM2007, data.sp), covariate = "landcover"),
-                    data.frame(variogram(PEAT_DEPTH ~ SLOPE + ELEVATION + consdryday + LCM2007, data.sp), 
-                               covariate = "all.cont")
-                    )
-    
-ggplot(PD.vgm.comp, aes(x = dist, y = gamma))+
-  geom_point(aes(shape = covariate, colour = covariate))
+plot(variogram(peat_depth ~ 1, input.data.sp, cloud = TRUE))
 ```
 
 
-
 ```{r}
-plot(variogram(PEAT_DEPTH ~ 1, data.sp, cloud = TRUE))
-```
-
-
-
-```{r}
-head(data.sp)
-table(data.sp$PEATTYPE)
-table(data.sp$LCM2007)
-class(data.sp$LCM2007)
+head(input.data.sp)
 ```
 
 ###Kriging
@@ -225,30 +219,53 @@ First remove duplicate locations otherwise you get the following error:
 'Covariance matrix singular at location [276400,95250,0]: skipping...'
 
 ```{r}
-zerodist(obj = data.sp, zero = 0, unique.ID = FALSE, memcmp = TRUE)
-data.sp.dedup <- data.sp[-zerodist(data.sp)[,1],] 
-dim(data.sp); dim(data.sp.dedup)
+zerodist(obj = input.data.sp, zero = 0, unique.ID = FALSE, memcmp = TRUE)
+data.sp.dedup <- input.data.sp[-zerodist(data.sp)[,1],] 
+dim(input.data.sp); dim(data.sp.dedup)
 ```
 
 
 
 Ordinary kriging
 ```{r}
-pd.kriged = krige(formula = PEAT_DEPTH~1, data.sp.dedup, predictors.sp, model = PD.fit.sph)
-spplot(pd.kriged["var1.pred"])
-spplot(pd.kriged["var1.var"])
+# pd.kriged = krige(formula = peat_depth ~ 1, data.sp.dedup, predictors.sp, model = logPD.fit)
+# saveRDS(pd.kriged, "../data/pd.kriged.logPd.rds")
+pd.kriged.logPd <- readRDS("../data/pd.kriged.logPd.rds")
+
+spplot(pd.kriged.logPd["var1.pred"])
+spplot(pd.kriged.logPd["var1.var"])
+
+```
+
+regression kriging
+```{r}
+
+# pd.kriged = krige(formula = peat_depth ~ 1, data.sp.dedup, predictors.sp, model = PD.regr.fit)
+# saveRDS(pd.kriged, "../data/pd.kriged.regPd.rds")
+pd.kriged.regPd <- readRDS("../data/pd.kriged.regPd.rds")
+
+spplot(pd.kriged.regPd["var1.pred"])
+spplot(pd.kriged.regPd["var1.var"])
 
 summary(pd.kriged)
 hist(pd.kriged$var1.pred)
-hist(data$PEAT_DEPTH)
+hist(input.data$peat_depth)
 ```
+
 
 ###Conditional simulation
 
 ```{r}
-peatdepth.condsim = krige(PEAT_DEPTH~1, data.sp.dedup, predictors.sp, model = PD.fit.sph, nmax = 30, nsim = 4)
-str(peatdepth.condsim)
-spplot(peatdepth.condsim, main = "four conditional simulations")
+# pd.condsim = krige(peat_depth ~ 1, data.sp.dedup, predictors.sp, model = PD.fit.sph, nmax = 30, nsim = 4)
+# saveRDS(pd.condsim.sph, "../data/pd.condsim.sph.rds")
+pd.condsim.sph <- readRDS("../data/pd.condsim.sph.rds")
+spplot(pd.condsim.sph, main = "four conditional simulations")
+
+# # pd.condsim.regr = krige(peat_depth ~ 1, data.sp.dedup, predictors.sp, model = PD.regr.fit, nmax = 30, nsim = 4)
+# # saveRDS(pd.condsim.regr, "../data/pd.condsim.regr.rds")
+# pd.condsim.regr <- readRDS("../data/pd.condsim.regr.rds")
+# spplot(pd.condsim.regr, main = "four conditional simulations")
+
 
 ```
 
@@ -258,8 +275,8 @@ spplot(peatdepth.condsim, main = "four conditional simulations")
 Fitting a linear model of coregionalization.
 
 ```{r}
-g = gstat(g = NULL, id = "peat-depth", formula = PEAT_DEPTH ~ 1, data = data.sp)
-g = gstat(g, "elev", formula = ELEVATION ~ 1, data = data.sp)
+g = gstat(g = NULL, id = "peat-depth", formula = peat_depth ~ 1, data = input.data.sp)
+g = gstat(g, "elev", formula = elev ~ 1, data = input.data.sp)
 v = variogram(g)
 g = gstat(g, model = vgm(1, "Exp", 300, 1), fill.all = TRUE)
 g.fit = fit.lmc(v, g)
@@ -270,5 +287,8 @@ plot(vgm.map, threshold = 5, col.regions = bpy.colors(), xlab = "", ylab = "")
 ```
 
 
+```{r}
+plot(vgm.map)
+```
 
 
