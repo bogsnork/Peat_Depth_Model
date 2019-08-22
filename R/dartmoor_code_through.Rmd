@@ -5,12 +5,15 @@ output: html_notebook
 
 Code through with an extract of data centred around dartmoor, based on the gstat Meuse example.  
 
+##Prepare data
+
 ###Packages
 ```{r}
 library(tidyverse)
 library(sf)
 library(sp)
 library(gstat)
+library(raster)
 ```
 
 ###Data
@@ -39,26 +42,108 @@ summary(data.sp$PEAT_DEPTH)
 hist(data.sp$PEAT_DEPTH)
 ```
 
+```{r}
+names(data)
+```
+
+
+### Predictors
+
+import cropped raster stack
+
+```{r}
+elev <- raster("../data/predictor_stack.tif", band = 1)
+aspect <- raster("../data/predictor_stack.tif", band = 2)
+slope <- raster("../data/predictor_stack.tif", band = 3)
+# outflow <- raster("../data/predictor_stack.tif", band = 4)
+# inflow <- raster("../data/predictor_stack.tif", band = 5)
+# gdd <- raster("../data/predictor_stack.tif", band = 6)
+# gsl <- raster("../data/predictor_stack.tif", band = 7)
+# rain_ann <- raster("../data/predictor_stack.tif", band = 8)
+# rain_daily <- raster("../data/predictor_stack.tif", band = 9)
+# raindays_10mm <- raster("../data/predictor_stack.tif", band = 10)
+# raindays_1mm <- raster("../data/predictor_stack.tif", band = 11)
+# temp_mean <- raster("../data/predictor_stack.tif", band = 12)
+# temp_min <- raster("../data/predictor_stack.tif", band = 13)
+# temp_max <- raster("../data/predictor_stack.tif", band = 14)
+```
+
+create raster stack
+```{r}
+predictors <- stack(elev, aspect, slope)
+names(predictors) <- c("ELEVATION", "ASPECT", "SLOPE")
+plot(predictors)
+```
+
+```{r}
+#convert to spatial points dataframe
+predictors.sp <- rasterToPoints(x = predictors, spatial = TRUE)
+crs(predictors.sp) <- crs(data.sp)
+spplot(predictors.sp)
+spplot(predictors.sp["ASPECT"])
+```
+
+
+###Extract predictor values at observation locations
+
+
+```{r}
+#create dataframe with peat depth as first col
+input.data <- data.frame(peat_depth = data$PEAT_DEPTH)
+
+#raster::extract environmental and topographic data for each peat depth measurement
+input.data$elev <- raster::extract(
+  elev, coordinates(data.sp)[,1:2])
+input.data$aspect <- raster::extract(
+  aspect, coordinates(data.sp)[,1:2])
+input.data$slope <- raster::extract(
+  slope, coordinates(data.sp)[,1:2])
+
+#convert to spatial points data frame
+coords <- st_coordinates(data.shp)
+proj4 <- "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs"
+
+input.data.sp <- sp::SpatialPointsDataFrame(data = input.data, coords = coords, proj4string = CRS(proj4))
+
+spplot(input.data.sp)
+```
+
+
+
+##Interpolate
+
+### Simple interpolation
+
+Inverse distance weighting
+
+```{r}
+peatdepth.idw <- idw(peat_depth~1, input.data.sp, predictors.sp)
+class(peatdepth.idw)
+str(peatdepth.idw)
+spplot(peatdepth.idw["var1.pred"], main = "peat depth inverse distance weighted interpolations")
+```
+
 
 ### Variograms
 ```{r}
-logPD.vgm = variogram(log(PEAT_DEPTH)~1, data.sp)
-logPD.vgm
-logPD.fit = fit.variogram(logPD.vgm, model = vgm(1, "Sph", 900, 1))
-logPD.fit
-plot(logPD.vgm, logPD.fit)
+# logPD.vgm = variogram(log(peat)depth~1, input.data.sp)
+# logPD.vgm
+# logPD.fit = fit.variogram(logPD.vgm, model = vgm(1, "Sph", 900, 1))
+# logPD.fit
+# plot(logPD.vgm, logPD.fit)
 ```
 
 NOT LOOKING GOOD, TRY WITHOUT LOG
 
 ```{r}
-PD.vgm = variogram(PEAT_DEPTH ~1, data.sp)
+PD.vgm = variogram(peat_depth ~1, input.data.sp)
 PD.vgm
 plot(PD.vgm)
 PD.fit.sph = fit.variogram(PD.vgm, model = vgm(500, "Sph", 2500, 1))
 PD.fit.mat = fit.variogram(PD.vgm, model = vgm(500, "Mat", 2500, 1))
-PD.fit
+PD.fit.sph
 plot(PD.vgm, PD.fit.sph)
+plot(PD.vgm, PD.fit.mat)
 ```
 
 
@@ -73,20 +158,116 @@ plot(PD.vgm, PD.fit.sph)
 Instead of the constant mean, denoted by \verb|~1|, we can specify a
 mean function, e.g. using \verb|~sqrt(dist)| as a predictor variable:
 
+
+
+
 ```{r}
-logPDr.vgm = variogram(PEAT_DEPTH ~ SLOPE + ELEVATION + consdryday, data.sp)
-logPDr.fit = fit.variogram(logPDr.vgm, model = vgm(500, "Mat", 2500, 1))
-logPDr.fit
-plot(logPDr.vgm, logPDr.fit)
+PD.regr.vgm = variogram(peat_depth ~ slope + elev, input.data.sp)
+PD.regr.fit = fit.variogram(PD.regr.vgm, model = vgm(500, "Exp", 2500, 1))
+PD.regr.fit
+plot(PD.regr.vgm, PD.regr.fit)
 ```
 
 
 
 
 
+Have a look at different co-variates
+
+```{r}
+PD.vgm.comp = data.frame(distance = variogram(peat_depth ~ 1, input.data.sp)$dist,
+                         none = variogram(peat_depth ~ 1, input.data.sp)$gamma,
+                         slope = variogram(peat_depth ~ slope, input.data.sp)$gamma,
+                         elev = variogram(peat_depth ~ elev, input.data.sp)$gamma,
+                         all = variogram(peat_depth ~ slope + elev, input.data.sp)$gamma)
+                        
+PD.vgm.comp = gather(PD.vgm.comp, key = covariate, value = semivariance, 2:5)
+
+ggplot(PD.vgm.comp, aes(x = distance, y = semivariance))+
+  geom_point(aes(shape = covariate))
+```
+
+##########################################
+##from here on I'm using a different source for the input data - need to change that to the one that matches the predictor layers (i.e. input.data.sp not data.sp)
+
+```{r}
+PD.vgm.comp = rbind(data.frame(variogram(PEAT_DEPTH ~ 1, data.sp), covariate = "none"),
+                    data.frame(variogram(PEAT_DEPTH ~ SLOPE, data.sp), covariate = "slope"),
+                    data.frame(variogram(PEAT_DEPTH ~ ELEVATION, data.sp), covariate = "elev"),
+                    data.frame(variogram(PEAT_DEPTH ~ consdryday, data.sp), covariate = "drydays"),
+                    data.frame(variogram(PEAT_DEPTH ~ LCM2007, data.sp), covariate = "landcover"),
+                    data.frame(variogram(PEAT_DEPTH ~ SLOPE + ELEVATION + consdryday + LCM2007, data.sp), 
+                               covariate = "all.cont")
+                    )
+    
+ggplot(PD.vgm.comp, aes(x = dist, y = gamma))+
+  geom_point(aes(shape = covariate, colour = covariate))
+```
 
 
 
+```{r}
+plot(variogram(PEAT_DEPTH ~ 1, data.sp, cloud = TRUE))
+```
+
+
+
+```{r}
+head(data.sp)
+table(data.sp$PEATTYPE)
+table(data.sp$LCM2007)
+class(data.sp$LCM2007)
+```
+
+###Kriging
+
+First remove duplicate locations otherwise you get the following error: 
+'Covariance matrix singular at location [276400,95250,0]: skipping...'
+
+```{r}
+zerodist(obj = data.sp, zero = 0, unique.ID = FALSE, memcmp = TRUE)
+data.sp.dedup <- data.sp[-zerodist(data.sp)[,1],] 
+dim(data.sp); dim(data.sp.dedup)
+```
+
+
+
+Ordinary kriging
+```{r}
+pd.kriged = krige(formula = PEAT_DEPTH~1, data.sp.dedup, predictors.sp, model = PD.fit.sph)
+spplot(pd.kriged["var1.pred"])
+spplot(pd.kriged["var1.var"])
+
+summary(pd.kriged)
+hist(pd.kriged$var1.pred)
+hist(data$PEAT_DEPTH)
+```
+
+###Conditional simulation
+
+```{r}
+peatdepth.condsim = krige(PEAT_DEPTH~1, data.sp.dedup, predictors.sp, model = PD.fit.sph, nmax = 30, nsim = 4)
+str(peatdepth.condsim)
+spplot(peatdepth.condsim, main = "four conditional simulations")
+
+```
+
+  
+
+###Cross Variography
+Fitting a linear model of coregionalization.
+
+```{r}
+g = gstat(g = NULL, id = "peat-depth", formula = PEAT_DEPTH ~ 1, data = data.sp)
+g = gstat(g, "elev", formula = ELEVATION ~ 1, data = data.sp)
+v = variogram(g)
+g = gstat(g, model = vgm(1, "Exp", 300, 1), fill.all = TRUE)
+g.fit = fit.lmc(v, g)
+g.fit
+plot(v, g.fit)
+vgm.map = variogram(g, cutoff = 1500, width = 100, map = TRUE)
+plot(vgm.map, threshold = 5, col.regions = bpy.colors(), xlab = "", ylab = "")
+```
 
 
 
