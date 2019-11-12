@@ -191,8 +191,8 @@ par(mfrow=c(1,2),mar=c(3,3,2,2),mgp=c(2,.8,0))
 plot(bin1, bin.cloud=T, main="classical estimator")
 plot(bin2, bin.cloud=T, main="modulus estimator")
 ##dev.off()
+par.ori <- par(mfrow=c(1,1))
 par(par.ori)
-
 
 ```
 

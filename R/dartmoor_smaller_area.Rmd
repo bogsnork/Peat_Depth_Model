@@ -1,0 +1,303 @@
+---
+title: "Dartmoor code through"
+output: html_notebook
+---
+
+Code through with an extract of data centred around dartmoor, based on the gstat Meuse example.  
+
+##Prepare data
+
+###Packages
+```{r}
+library(tidyverse)
+library(sf)
+library(sp)
+library(gstat)
+library(raster)
+```
+
+###Data
+
+```{r}
+data.shp <- sf::st_read("../data/peat_depths_dartmoor/peat_depths_dartmoor.shp")
+summary(data.shp)
+data <- data.frame(data.shp)
+coords <- st_coordinates(data.shp)
+proj4 <- "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs"
+
+data.sp <- sp::SpatialPointsDataFrame(data = data, coords = coords, proj4string = CRS(proj4))
+
+plot(data.sp)
+```
+
+```{r}
+class(data.sp)
+```
+
+
+### Peat depths
+
+```{r}
+summary(data.sp$PEAT_DEPTH)
+hist(data.sp$PEAT_DEPTH)
+```
+
+```{r}
+names(data)
+```
+
+
+### Predictors
+
+import cropped raster stack
+
+```{r}
+elev <- raster("../data/predictor_stack.tif", band = 1)
+aspect <- raster("../data/predictor_stack.tif", band = 2)
+slope <- raster("../data/predictor_stack.tif", band = 3)
+```
+
+create raster stack
+```{r}
+predictors <- stack(elev, aspect, slope)
+names(predictors) <- c("elev", "aspect", "slope")
+plot(predictors)
+```
+
+```{r}
+#convert to spatial points dataframe
+predictors.sp <- rasterToPoints(x = predictors, spatial = TRUE)
+crs(predictors.sp) <- crs(data.sp)
+spplot(predictors.sp)
+spplot(predictors.sp["elev"])
+```
+
+
+###Extract predictor values at observation locations
+
+
+```{r}
+#create dataframe with peat depth as first col
+input.data <- data.frame(peat_depth = data$PEAT_DEPTH)
+
+#raster::extract environmental and topographic data for each peat depth measurement
+input.data$elev <- raster::extract(
+  elev, coordinates(data.sp)[,1:2])
+input.data$aspect <- raster::extract(
+  aspect, coordinates(data.sp)[,1:2])
+input.data$slope <- raster::extract(
+  slope, coordinates(data.sp)[,1:2])
+
+#convert to spatial points data frame
+coords <- st_coordinates(data.shp)
+proj4 <- "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs"
+
+input.data.sp <- sp::SpatialPointsDataFrame(data = input.data, coords = coords, proj4string = CRS(proj4))
+
+
+spplot(input.data.sp)
+```
+
+```{r}
+mapdata <- data.frame(input.data.sp@data, input.data.sp@coords)
+head(mapdata)
+```
+
+```{r}
+ggplot(mapdata, aes(x = X, y = Y)) +
+  geom_point(aes(colour = peat_depth))+
+  scale_color_distiller(palette = "Reds", direction = 1)+
+  coord_equal()+
+  labs(title = "Peat depth spatial distribution")
+```
+
+```{r}
+ggplot(mapdata, aes(x = elev, y = slope)) +
+  geom_point(aes(colour = peat_depth))+
+  scale_color_distiller(palette = "Reds", direction = 1)+
+  labs(title = "Peat depth: elevation by slope")
+```
+
+```{r}
+ggplot(mapdata, aes(x = aspect, y = peat_depth)) +
+  geom_point(aes(colour = peat_depth))+
+  scale_color_distiller(palette = "Reds", direction = 1)+
+  coord_polar() +
+  labs(title = "Peat depth by aspect")
+
+```
+
+##Create prediction area
+
+```{r}
+#select a well sampled area to predict within
+plot(input.data.sp)
+crop.extent <- extent(c(xmin = 25575, xmax = 260000, ymin = 75000, ymax = 80000))
+plot(crop(input.data.sp, crop.extent))
+predictors.cropped.sp <- crop(predictors.sp, crop.extent)
+predictors.cropped.map <- data.frame(predictors.cropped.sp@data, predictors.cropped.sp@coords)
+```
+
+```{r}
+p.elev <- ggplot(predictors.cropped.map, aes(x = x, y = y)) +
+  geom_point(aes(colour = elev)) + coord_equal() +
+  scale_colour_distiller(palette = "Reds") +  
+  labs(title = "Elevation", x = "", y = "")
+p.asp <- ggplot(predictors.cropped.map, aes(x = x, y = y)) +
+  geom_point(aes(colour = aspect)) + coord_equal() + 
+  scale_colour_distiller(palette = "Blues") +  
+  labs(title = "Aspect", x = "", y = "")
+p.slo <- ggplot(predictors.cropped.map, aes(x = x, y = y)) +
+  geom_point(aes(colour = slope))  + coord_equal()+ 
+  scale_colour_distiller(palette = "Greens") +  
+  labs(title = "Slope", x = "", y = "")
+p.theme <- theme(legend.position = "bottom")
+
+cowplot::plot_grid(
+  p.elev + p.theme, 
+  p.asp + p.theme,
+  p.slo + p.theme,
+  axis = "left", nrow = 1, labels = "auto"
+)
+```
+
+
+
+##Interpolate
+
+### Simple interpolation
+
+Inverse distance weighting
+
+```{r}
+peatdepth.idw <- idw(peat_depth~1, input.data.sp, predictors.cropped.sp)
+class(peatdepth.idw)
+str(peatdepth.idw)
+spplot(peatdepth.idw["var1.pred"], main = "peat depth inverse distance weighted interpolations")
+```
+
+
+
+### Variograms
+```{r}
+#log of peat depth plus one
+logPD.vgm = variogram(log(peat_depth+1)~1, input.data.sp)
+logPD.vgm
+logPD.fit = fit.variogram(logPD.vgm, model = vgm(1, "Sph", 900, 1))
+logPD.fit
+plot(logPD.vgm, logPD.fit)
+```
+
+
+
+```{r}
+PD.vgm = variogram(peat_depth ~1, input.data.sp)
+PD.vgm
+plot(PD.vgm)
+PD.fit.sph = fit.variogram(PD.vgm, model = vgm(500, "Sph", 2500, 1))
+PD.fit.mat = fit.variogram(PD.vgm, model = vgm(500, "Mat", 2500, 1))
+PD.fit.sph
+plot(PD.vgm, PD.fit.sph)
+plot(PD.vgm, PD.fit.mat)
+```
+
+
+
+Instead of the constant mean, denoted by \verb|~1|, we can specify a
+mean function, e.g. using \verb|~sqrt(dist)| as a predictor variable:
+
+```{r}
+PD.regr.vgm = variogram(peat_depth ~ slope + elev, input.data.sp)
+PD.regr.fit = fit.variogram(PD.regr.vgm, model = vgm(500, "Exp", 2500, 1))
+PD.regr.fit
+plot(PD.regr.vgm, PD.regr.fit)
+```
+
+
+
+
+
+Have a look at different co-variates
+
+```{r}
+PD.vgm.comp = data.frame(distance = variogram(peat_depth ~ 1, input.data.sp)$dist,
+                         none = variogram(peat_depth ~ 1, input.data.sp)$gamma,
+                         slope = variogram(peat_depth ~ slope, input.data.sp)$gamma,
+                         elev = variogram(peat_depth ~ elev, input.data.sp)$gamma,
+                         all = variogram(peat_depth ~ slope + elev, input.data.sp)$gamma)
+                        
+PD.vgm.comp = gather(PD.vgm.comp, key = covariate, value = semivariance, 2:5)
+
+ggplot(PD.vgm.comp, aes(x = distance, y = semivariance))+
+  geom_point(aes(shape = covariate))
+```
+
+```{r}
+plot(variogram(peat_depth ~ 1, input.data.sp, cloud = TRUE))
+```
+
+
+```{r}
+head(input.data.sp)
+```
+
+###Kriging
+
+First remove duplicate locations otherwise you get the following error: 
+'Covariance matrix singular at location [276400,95250,0]: skipping...'
+
+```{r}
+zerodist(obj = input.data.sp, zero = 0, unique.ID = FALSE, memcmp = TRUE)
+data.sp.dedup <- input.data.sp[-zerodist(data.sp)[,1],] 
+dim(input.data.sp); dim(data.sp.dedup)
+```
+
+
+
+Ordinary kriging
+```{r}
+pd.kriged.crop = krige(formula = peat_depth ~ 1, data.sp.dedup, predictors.cropped.sp, model = logPD.fit)
+saveRDS(pd.kriged.crop, "../data/pd.kriged.crop.logPd.rds")
+pd.kriged.crop.logPd <- readRDS("../data/pd.kriged.crop.logPd.rds")
+
+spplot(pd.kriged.crop.logPd["var1.pred"])
+spplot(pd.kriged.crop.logPd["var1.var"])
+
+```
+
+regression kriging
+```{r}
+
+pd.kriged = krige(formula = peat_depth ~ 1, data.sp.dedup, predictors.cropped.sp, model = PD.regr.fit)
+saveRDS(pd.kriged, "../data/pd.kriged.crop.regPd.rds")
+pd.kriged.crop.regPd <- readRDS("../data/pd.kriged.crop.regPd.rds")
+
+spplot(pd.kriged.crop.regPd["var1.pred"])
+spplot(pd.kriged.crop.regPd["var1.var"])
+
+summary(pd.kriged)
+hist(pd.kriged$var1.pred)
+hist(input.data$peat_depth)
+```
+
+
+###Conditional simulation
+
+```{r}
+pd.condsim = krige(peat_depth ~ 1, data.sp.dedup, predictors.cropped.sp, model = PD.fit.sph, nmax = 30, nsim = 4)
+saveRDS(pd.condsim, "../data/pd.condsim.crop.sph.rds")
+pd.condsim.crop.sph <- readRDS("../data/pd.condsim.crop.sph.rds")
+spplot(pd.condsim.crop.sph, main = "four conditional simulations")
+
+# pd.condsim.regr = krige(peat_depth ~ 1, data.sp.dedup, predictors.cropped.sp, model = PD.regr.fit, nmax = 30, nsim = 4)
+# saveRDS(pd.condsim.regr, "../data/pd.condsim.regr.rds")
+pd.condsim.regr <- readRDS("../data/pd.condsim.regr.rds")
+spplot(pd.condsim.regr, main = "four conditional simulations")
+
+
+```
+
+  
+
+
+

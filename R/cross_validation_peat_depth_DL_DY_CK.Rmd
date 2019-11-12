@@ -1,0 +1,594 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#Peat depth predictions
+
+This file mainly does a cross validation analysis of the peat depth data
+with the aim of comparing predictive accuracy for a number of models
+
+------------------------------------------------------------------------------
+File authors; Duncan Lee (University of Glasgow); Dylan Young (University of
+Leeds)
+
+Data from Dartmoor provided by Lauren Parry. A version of this file was used in
+Spatial models with covariates improve estimates of peat depth in blanket
+peatlands 
+Young, Dylan M. & Parry, Lauren & Lee, Duncan & Ray, Surajit. (2018). 
+Spatial models with covariates improve estimates of peat depth in blanket 
+peatlands. PLOS ONE. 13. e0202691. 10.1371/journal.pone.0202691. 
+
+Please give credit to the originators and make clear any modifications you make
+(including the date the modifications were made).
+
+------------------------------------------------------------------------------
+
+### Load libraries required.
+```{r}
+library(geoR)
+library(tidyverse)
+```
+
+------------------------------------------------------------------------------
+
+## 1. Prepare data
+
+Set the column numbers for covariates
+
+5 - elevation
+6 - slope
+7 - Aspect
+8 - Aspect category
+9 - Vegetation
+10 - Soil
+
+```{r}
+covars <- c(5, 6)
+
+# Read in the data
+#dat <- read.csv(file = "peat_depth_observations_dartmoor.csv")
+dat <- read.csv(file = "../young_2018/dataset_604.csv")
+dat.bak <- dat
+
+# Choose which data to use in the predictions; ST = stratified sampling, GR =
+# gridded sampling. If no choice is made then all data is used. Edit as necessary
+# Stratified sampling
+dat.choice <- 'ST'
+# 250 m grid sampling
+dat.choice <- 'GR'
+
+if (!exists('dat.choice')) {
+  dat <- dat
+} else if (dat.choice == 'ST') {
+  dat <- dat[dat$Source %in% 'ST', ]
+  dat$Source <- factor(dat$Source)
+} else if (dat.choice == 'GR') {
+  dat <- dat[dat$Source %in% 'GR', ]
+  dat$Source <- factor(dat$Source)
+}
+
+# Normalise the data
+#  In exploratory analyses sqrt gave more normal looking residuals than log.
+dat$sqrtdepth <- sqrt(dat$depth)
+head(dat)
+n <- nrow(dat)
+
+```
+
+
+------------------------------------------------------------------------------
+
+## 2. Exploratory analysis - uncomment as necessary
+
+### boxplots and pairs plots of the data
+
+```{r}
+
+ # pairs(dat[ ,c(19, 1,2,5,6,7,11)], pch=19)
+ # pairs(dat[ ,c(19, 12:18)], pch=19)
+ # boxplot(dat$sqrtdepth~dat$Source)
+ # boxplot(dat$sqrtdepth~dat$Aspect_cat)
+ # boxplot(dat$sqrtdepth~dat$Vegetation)
+ # boxplot(dat$sqrtdepth~dat$Soil)
+
+```
+
+
+NOTE: aspect is circular need to account for this - sine or cosine or arc sine
+transformation of it.
+
+### Exploratory linear model analysis
+
+```{r}
+
+mod.lm.test <- lm(sqrtdepth~elevation + Slope_5m, data=dat)
+summary(mod.lm.test)
+
+resid <- residuals(mod.lm.test)
+plot(resid)
+qqnorm(resid)
+qqline(resid)
+dat$resid <- resid
+```
+
+Sqrt scale looks ok
+
+------------------------------------------------------------------------------
+
+## 3. Fit a geostatistical model to the data to look for evidence of spatial autocorrelation after accounting for covariates
+
+ Create a geoR data object - the package that does the spatial modelling
+ this requires specifying the response, coordinates and covariates.
+ The covariates are based on the model above, if you want different ones you
+ will need to change them in covars
+
+```{r}
+sp_depth <- as.geodata(obj=dat, coords.col=1:2, data.col=11, covar.col = covars)
+
+# Jitter the 2 duplicated data locations which appear to be identical
+names(sp_depth)
+#coords, data, covariate (source, elevation)
+set.seed(2490)
+sp_depth <- jitterDupCoords(sp_depth, max=0.01)
+```
+
+### Plot the spatial object
+In the top left plot the data have been split into 4 colours based on
+quartiles (red is highest)
+
+```{r}
+plot(sp_depth)
+```
+
+
+### Fit a geostatistical model to all the data
+
+```{r}
+model.geo <- likfit(geodata=sp_depth, trend=~elevation + Slope_5m,
+                    ini.cov.pars=c(15, 0.05), fix.nugget=FALSE,
+                    cov.model="exponential")
+summary(model.geo)
+```
+
+```{r}
+plot(variog(sp_depth), main = "why does line and variog not line up?")
+lines(model.geo)
+```
+
+
+The key covariance parameters here are:
+
+- partial sill - amount of spatially correlated variation
+- nugget - amount of non-spatial random variation
+- asymptotic range - distance in degrees two point have to be apart for them to be uncorrelated.
+- partial sill > nugget here so strong spatial variation after accounting for
+ covariates.
+
+------------------------------------------------------------------------------
+
+## 4.  Conduct the cross validation exercise
+
+ Split the data into 10 roughly equally sized groups, and use 9 groups to fit
+ the model and predict sqrt depth for the tenth group. Repeat this for each of
+ the 10 groups in turn.
+ This may depend on how the data are split into 10 groups, so repeat this 10
+ times with different groupings to average over this variation.
+
+ WARNING - this will take a while (hours) to run for large datasets.
+
+ The code below runs two models:
+ 
+ - a simple linear model with given covariates.
+ - a spatial correlation model with the same covariates.
+ - common spatial covariance models are exponential, spherical and matern.
+ 
+ This is a non-Bayesian analysis.
+
+#### Create a matrix to store the results
+ Store for each model the prediction and a 95% prediction interval
+ Fit two models, a linear model with no spatial correlation (LM) and a full
+ spatial correlation model with the same mean function (SM).
+ LPI and UPI stand for lower / upper prediction interval.
+
+```{r}
+## Array - rows, columns, number of arrays
+results <- array(NA, c(n, 6,10))
+colnames(results) <- c("pred_LM", "LPI_LM", "UPI_LM", 
+                       "pred_SM", "LPI_SM", "UPI_SM")
+```
+
+ One slight issue with geoR is when it predicts with factor (categorical)
+ covariates. If the prediction set does not include all combinations of any
+ factor there will be an error.
+ Therefore set up a set of dummy prediction points that contain all
+ combinations of the factors.
+ Predictions at these dummy points will not be used.
+ The covariates included are soil, source and vegetation.
+ The locations of these dummy locations need to be jittered to avoid numerical
+ issues.
+ 
+```{r}
+#Which are the columns with factors?
+dat.fact <- dat[ ,sapply(dat, is.factor)]
+#We don't need the Aspect_cat
+dat.fact <- dat.fact[ ,-2]
+#Keep only the unique rows
+dat.fact <- dat.fact[!duplicated(dat.fact), ]
+dummy <- dat[c(1, 2, 18, 106), ]
+dummy <- dat[row.names(dat.fact), ]
+dummy$longitude <- dummy$longitude + rnorm(dim(dummy)[1], sd = 0.01)
+dummy$latitude <- dummy$latitude + rnorm(dim(dummy)[1], sd = 0.01)
+n.dummy <- nrow(dummy)
+```
+
+#  
+#  
+#### The big loop:  
+```{r}
+
+# Loop over the 10 replications of splitting the data into 10 equally size groups.
+
+nreps <- 10
+
+for(r in 1:nreps) {
+  print(r)
+# Split the sites into 10 random groups of equal size.
+ 
+  # Create random orderings until each of the 10 groups has at least one Winter Hill soil type
+test=1
+    while(test==1)
+    {
+    data.order <- sample(1:n)
+    split_m_total <- length(data.order)
+    split_m_G2 <- as.integer(split_m_total / 10)
+    split_m_size <- length(data.order) %% 10
+    # Therefore split_m_size chunks will have size split_m_G2 + 1 and the
+    # remaining will have size split_size_G2
+    split_m_G1 <- split_m_G2 + 1
+
+    # For all data
+    # To allow for changes in number of rows in dat
+    split.matrix <-
+      data.frame(sites=data.order,
+        group = c(kronecker(1:split_m_size, rep(1,split_m_G1)),
+                kronecker((split_m_size + 1):10, rep(1,split_m_G2))))
+     # here column 1 is the row numbers and column 2 is the group number
+     # Check each group has 2 Soil types
+    types <- rep(NA,10)
+        for (j in 1:10)
+        {
+        dat.temp <- dat[split.matrix[split.matrix$group == j,1] , ]
+        types[j] <- sum(table(dat.temp$Soil) == nrow(dat.temp))
+        }
+    test <- max(types)
+    }
+
+# Undertake the 10-fold cross validation
+   for (i in 1:10) {
+     # Set up the fitting and the prediction data sets
+    dat.fit <- dat[split.matrix[split.matrix$group!=i,1] , ]
+    dat.pred <- dat[split.matrix[split.matrix$group==i,1] , ]
+    dat.pred <- rbind(dat.pred, dummy)
+
+     # Fit the linear model
+    model.lm <- lm(formula=sqrtdepth~elevation + Slope_5m, data=dat.fit)
+    model.lm.predictions <- 
+      predict(object=model.lm, newdata=dat.pred, interval="prediction")
+
+     # Fit the spatial model
+       # Set up the spatial data object for the fitting data set
+       # Ensure you add in the correct covariates here that you wish to use
+    test.sp <-
+      as.geodata(obj=dat.fit, coords.col=1:2, data.col=11, covar.col= covars)
+     # Jitter anyduplicated data locations which appear to be identical
+    test.sp <- jitterDupCoords(test.sp, max=0.01)
+
+
+     # Fit the models
+    model.sm <-
+      likfit(geodata=test.sp, trend=~elevation + Slope_5m,
+             ini.cov.pars=c(15, 0.05), fix.nugget=FALSE,
+             cov.model="exponential", messages = F)
+     # There are alternative spatial correlation models  so you could use these instead of exponential (e.g. spherical)
+    print(r) # Monitor progress; each of the 10 r will be run 10(i) times.
+    print(i)
+
+     # Do the predictions
+    control.sm <-
+      krige.control(type.krige="OK", trend.d=~dat.fit$elevation +
+                    dat.fit$Slope_5m, trend.l=~dat.pred$elevation +
+                    dat.pred$Slope_5m, obj.model=model.sm)
+
+    kriging.sm <-
+      krige.conv(geodata=test.sp, locations=dat.pred[ ,1:2], krige=control.sm)
+
+    model.sm.predictions <-
+      cbind(kriging.sm$predict,
+            kriging.sm$predict - 1.96 * sqrt(kriging.sm$krige.var),
+            kriging.sm$predict+ 1.96 * sqrt(kriging.sm$krige.var))
+
+     # Save the results but removing the last n.dummy values added to make the
+     # kriging function work
+    n.preds <- nrow(dat.pred) - n.dummy
+
+    for(j in 1:n.preds)
+    {
+         # Choose the row (site) the  prediction corresponds to.
+        which.row <- which(rownames(dat.pred)[j]==rownames(dat))
+
+         # Save the results
+        results[which.row, 1:3, r] <- model.lm.predictions[j, ]
+        results[which.row, 4:6, r] <- model.sm.predictions[j, ]
+    }
+  }
+}
+
+```
+
+
+#### Write predictions to dataframe
+
+```{r}
+#combine original data and predictions
+results.df <- cbind(id = seq(1:nrow(dat)), dat, data.frame(results))
+results.df
+#make tidy data
+results.ty <- gather(results.df, key = key, value = value, pred_LM.1:UPI_SM.10) %>% 
+  separate(col = key, into = c("key", "modeltype", "run")) %>% 
+  spread(key = key, value = value)
+results.ty
+
+```
+
+
+------------------------------------------------------------------------------
+
+## 5. Summarise the results  
+
+### Compute metrics of interest  
+
+#### Bias  
+
+- measures whether the predictions are too large or too small on average
+- want to be as close to zero as possible but due to random variation will not be exactly zero.
+
+```{r}
+# Linear model
+mean(results[,1, ] - matrix(rep(dat$sqrtdepth,10), nrow=n, ncol=10,
+                            byrow=FALSE))
+# Spatial model
+mean(results[,4, ] - matrix(rep(dat$sqrtdepth,10), nrow=n, ncol=10,
+                            byrow=FALSE))
+```
+
+
+#### RMSE  
+
+- measures average difference between the true and predicted values ignoring sign. 
+- want to be as small as possible  
+
+```{r}
+# Linear model
+sqrt(mean((results[,1, ] - matrix(rep(dat$sqrtdepth,10), nrow=n, ncol=10,
+                                  byrow=FALSE))^2)) 
+# Spatial model
+sqrt(mean((results[,4, ] - matrix(rep(dat$sqrtdepth,10), nrow=n, ncol=10,
+                                  byrow=FALSE))^2))
+
+```
+####  
+#### Coverage 
+
+- measures the probability that the 95% prediction intervals contain the true value 
+- want to be 0.95
+
+
+```{r}
+# Linear model
+mean(matrix(rep(dat$sqrtdepth,10), nrow=n, ncol=10, byrow=FALSE) >
+     results[ ,2, ] & matrix(rep(dat$sqrtdepth,10), nrow=n, ncol=10,
+                             byrow=FALSE) < results[ ,3, ])
+# Spatial model
+mean(matrix(rep(dat$sqrtdepth,10), nrow=n, ncol=10, byrow=FALSE) >
+     results[ ,5, ] & matrix(rep(dat$sqrtdepth,10), nrow=n, ncol=10,
+                             byrow=FALSE) < results[ ,6, ])
+```
+
+
+#### Interval width   
+
+- the width of the 95% prediction intervals
+- want to be as small as possible provided that the coverage above is around 0.95. If the coverage is much lower than 0.95 then this is meaningless.
+
+```{r}
+# Linear model
+mean(results[ ,3, ] - results[ ,2, ])
+# Spatial model
+mean(results[ ,6, ] - results[ ,5, ])
+```
+
+### visualise predictions
+
+```{r}
+graphdata <- results.ty %>% #filter(modeltype == "LM") %>% 
+  group_by(modeltype, id) %>% 
+  summarise(depth = mean(depth), pred = mean(pred)) #calculate mean result for each point
+
+graphmetrics <- graphdata %>% 
+  group_by(modeltype) %>% 
+  summarise(RMSE = sqrt(mean(depth - (pred^2))^2),
+            cc = cor(depth, (pred^2)))
+
+ggplot(graphdata, aes(x = depth, y = pred^2)) +
+  geom_point(aes(colour = modeltype))+
+  geom_abline(slope = 1) +
+  coord_equal() +
+  geom_text(data = graphmetrics, aes(x = 50, y = c(200, 250), colour = modeltype, 
+                                     label = paste("RMSE =", round(RMSE, 2), "cm \nCC =", round(cc, 2))))
+
+```
+
+
+```{r}
+class(model.geo)
+summary(model.geo)
+
+```
+
+
+
+
+
+
+------------------------------------------------------------------------------  
+
+## 6. Do some plots
+
+#### Plot the semi-variogram to test for the presence of spatial autocorrelation
+
+```{r}
+residuals <- residuals(model.lm)
+dat.fit$residuals <- residuals
+resid.sp <- as.geodata(obj=dat.fit, coords.col=1:2, data.col=11,
+                       covar.col= covars)
+resid.sp <- jitterDupCoords(resid.sp, max=0.01)
+vari1 <- variog(resid.sp)
+vari1.mc <- variog.mc.env(resid.sp, obj.variog=vari1)
+
+plot(vari1, envelope.obj = vari1.mc, xlab="Distance (°)",
+     ylab="Estimated semi-variogram", las = 1, cex = 1.3, cex.axis = 1.2,
+     xaxs = 'i', yaxs = 'i', xlim = c(0,0.27), ylim = c(0,34), yaxt = 'n',
+     cex.lab = 1.2)
+axis(2, at = seq(0, 30, 10), labels = T, cex.axis = 1.2, las = 1)
+
+```
+
+
+
+## Try and use this model to predict against my own predictors
+
+```{r}
+library(geoR)
+library(tidyverse)
+library(sf)
+library(sp)
+library(gstat)
+library(raster)
+```
+
+####Import predictors
+```{r}
+  #Import observations----
+data.shp <- rgdal::readOGR("../data/peat_depths_dartmoor/peat_depths_dartmoor.shp")
+head(coordinates(data.shp))
+proj4string(data.shp)
+
+data <- data.frame(data.shp)
+#coords <- coordinates(data.shp) #eastnorth
+#proj4 <- "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs"
+coords <- coordinates(sp::spTransform(data.shp, CRS("+proj=longlat +datum=WGS84"))) #lonlat
+proj4 <- "+proj=longlat +datum=WGS84" #proj4 lonlat
+
+data.sp <- sp::SpatialPointsDataFrame(data = data, coords = coords, proj4string = CRS(proj4))
+
+  #import predictors from cropped raster stack----
+elev <- raster("../data/predictor_stack.tif", band = 1)
+slope <- raster("../data/predictor_stack.tif", band = 3)
+  #create raster stack
+predictors <- stack(elev, slope)
+names(predictors) <- c("elevation", "Slope_5m")
+#plot(predictors)
+  #convert to spatial points dataframe
+predictors.sp <- rasterToPoints(x = predictors, spatial = TRUE)
+
+#select a well sampled area (of the NE data) to predict within----
+# plot(input.data.sp)
+crop.extent <- extent(c(xmin = 25575, xmax = 260000, ymin = 75000, ymax = 80000))
+# plot(crop(input.data.sp, crop.extent))
+predictors.cropped.sp <- crop(predictors.sp, crop.extent)
+predictors.cropped.sp <-spTransform(predictors.cropped.sp, CRSobj = proj4string(data.sp)) #transform to lonlat if necessary
+predictors.cropped.map <- data.frame(predictors.cropped.sp@data, predictors.cropped.sp@coords)
+
+#crop data
+
+```
+
+
+
+
+```{r}
+summary(predictors.sp)
+names(predictors.sp)
+spplot(predictors.sp["elevation"])
+sp.points(data.sp["PEAT_DEPTH"])
+spplot(predictors.cropped.sp["Slope_5m"])
+```
+
+
+
+```{r}
+# # Fit the models
+# model.sm <-
+#   likfit(geodata=test.sp, trend=~elevation + Slope_5m,
+#          ini.cov.pars=c(15, 0.05), fix.nugget=FALSE,
+#          cov.model="exponential", messages = F)
+# # There are alternative spatial correlation models  so you could use these instead of exponential (e.g. spherical)
+# # Do the predictions
+#    control.sm <-
+#      krige.control(type.krige="OK", 
+#                    trend.d=~dat.fit$elevation + dat.fit$Slope_5m, 
+#                    trend.l=~dat.pred$elevation + dat.pred$Slope_5m, obj.model=model.sm)
+# 
+#    kriging.pred <-
+#      krige.conv(geodata=test.sp, locations=dat.pred[ ,1:2], krige=control.sm)
+
+# Fit the model
+  model.sm <-
+      likfit(geodata=data.sp, trend=~elevation + Slope_5m,
+             ini.cov.pars=c(15, 0.05), fix.nugget=FALSE,
+             cov.model="exponential", messages = F)
+     # There are alternative spatial correlation models  so you could use these instead of exponential (e.g. spherical)
+    
+control.pred <-
+  krige.control(type.krige="OK", 
+                trend.d=~dat$elevation + dat$Slope_5m, 
+                trend.l= ~ predictors.cropped.sp$elevation + predictors.cropped.sp$Slope_5m, 
+                obj.model=model.geo)
+
+kriging.pred <-
+  krige.conv(geodata=sp_depth, 
+             locations=predictors.cropped.sp@coords, 
+             krige=control.pred)
+
+prediction.sp <- predictors.cropped.sp
+prediction.sp$pd_pred <-unlist( kriging.pred["predict"])
+
+```
+
+
+```{r}
+spplot(prediction.sp["pd_pred"])
+spplot(prediction.sp["elevation"])
+spplot(prediction.sp["Slope_5m"])
+```
+
+
+
+
+## Test the model against our own data
+
+To do this may need to check the following: 
+
+- are the predictors the same - e.g. extract predictors for DY's data coordinates and compare
+
+TO DO
+
+
+
+
+
+
+
+
+
