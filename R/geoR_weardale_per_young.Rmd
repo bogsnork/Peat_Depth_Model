@@ -18,6 +18,7 @@ Code through with an extract of data centred around dartmoor, using geoR vignett
 
 ###Packages
 ```{r}
+#install.packages(c("geoR", "tidyverse", "sf", "sp", "gstat", "raster"))
 library(geoR)
 library(tidyverse)
 library(sf)
@@ -37,7 +38,13 @@ rundate <- paste0("run_", format(Sys.time(), format = "%Y%m%d-%H%M"))
 
 ```{r}
   #Import observations----
-data.shp <- sf::st_read("../data/weardale/upper_weardale_GPR.shp")
+data_nogpr.shp <- sf::st_read("../data/weardale/upper_weardale_noGPR.shp")
+data_gpr.shp <- sf::st_read("../data/weardale/upper_weardale_GPRselected.shp")
+
+data_nogpr.shp$GPR <- 0
+data_gpr.shp$GPR <- 1
+data.shp <- rbind(data_nogpr.shp, data_gpr.shp)
+
 data <- data.frame(data.shp)
 coords <- st_coordinates(data.shp)
 proj4 <- "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs"
@@ -179,7 +186,7 @@ plot(input.data.gd)
 ```
 
 ```{r}
-max_dist <- 4000
+max_dist <- 400
 #I don't understand these plots
 par(mfrow = c(2,2), mar=c(3,3,1,1), mgp=c(2,0.8,0))
 points(input.data.gd, xlab = "Coord X", ylab = "Coord Y", main = "peat depth overview")
@@ -200,8 +207,6 @@ pairs(dat)
 ```
 
 
-NOTE: aspect is circular need to account for this - sine or cosine or arc sine
-transformation of it. - IGNORING ASPECT FOR THE TIME BEING
 
 ### Exploratory linear model analysis
 
@@ -231,7 +236,7 @@ qqline(resid)
 dat$resid <- resid
 ```
 
-better, still not fantastic
+  still not fantastic
 
 
 ## 3. Fit a geostatistical model to the data to look for evidence of spatial autocorrelation after accounting for covariates
@@ -243,7 +248,7 @@ better, still not fantastic
  will need to change them in covars
 
 ```{r}
-sp_depth <- as.geodata(obj=dat, coords.col=6:7, data.col=2, covar.col = c(3,5))
+sp_depth <- as.geodata(obj=dat, coords.col=c("x", "y"), data.col="sqrt_peat_depth", covar.col = c("elev", "slope"))
 
 # Jitter any duplicated data locations which appear to be identical
 names(sp_depth)
@@ -282,11 +287,11 @@ plot(sp_depth.v)
 
 ```{r}
 (model.geo.exp <- likfit(geodata=sp_depth, trend = ~sp_depth$covariate$elev+sp_depth$covariate$slope,
-                    ini.cov.pars=c(4, 1000), fix.nugget=FALSE,
+                    ini.cov.pars=c(4, 100), fix.nugget=FALSE,
                     cov.model="exponential"))
 
 (model.geo.sph <- likfit(geodata=sp_depth, trend = ~sp_depth$covariate$elev+sp_depth$covariate$slope,
-                    ini.cov.pars=c(4, 1000), fix.nugget=FALSE,
+                    ini.cov.pars=c(4, 100), fix.nugget=FALSE,
                     cov.model="spherical"))
 
 #chosen model
@@ -307,7 +312,7 @@ lines(model.geo.exp, col = "red")
 #chosen model
 model.geo <- likfit(geodata=sp_depth, trend = ~sp_depth$covariate$elev+sp_depth$covariate$slope,
                     ini.cov.pars=c(4, 800), fix.nugget=FALSE,
-                    cov.model="spherical")
+                    cov.model="exponential")
 summary(model.geo)
 write_rds(model.geo, path = paste0("../outputs/model.geo_", rundate, ".rds"))
 ```
@@ -388,10 +393,12 @@ for(r in 1:nreps) {
   print(r)
 # Split the sites into 10 random groups of equal size.
  
-  # Create random orderings until each of the 10 groups has at least one Winter Hill soil type
-test=1
-    while(test==1)
-    {
+#  # Create random orderings until each of the 10 groups has at least one Winter Hill soil type
+# test=1
+#     while(test==1)
+#     {
+
+  # Create random orderings
     data.order <- sample(1:n)
     split_m_total <- length(data.order)
     split_m_G2 <- as.integer(split_m_total / 10)
@@ -407,15 +414,15 @@ test=1
         group = c(kronecker(1:split_m_size, rep(1,split_m_G1)),
                 kronecker((split_m_size + 1):10, rep(1,split_m_G2))))
      # here column 1 is the row numbers and column 2 is the group number
-     # Check each group has 2 Soil types
-    types <- rep(NA,10)
-        for (j in 1:10)
-        {
-        dat.temp <- dat[split.matrix[split.matrix$group == j,1] , ]
-        types[j] <- sum(table(dat.temp$Soil) == nrow(dat.temp))
-        }
-    test <- max(types)
-    }
+    #  # Check each group has 2 Soil types
+    # types <- rep(NA,10)
+    #     for (j in 1:10)
+    #     {
+    #     dat.temp <- dat[split.matrix[split.matrix$group == j,1] , ]
+    #     types[j] <- sum(table(dat.temp$Soil) == nrow(dat.temp))
+    #     }
+    # test <- max(types)
+    # }
 
 # Undertake the 10-fold cross validation
    for (i in 1:10) {
@@ -433,7 +440,7 @@ test=1
        # Set up the spatial data object for the fitting data set
        # Ensure you add in the correct covariates here that you wish to use
     test.sp <-
-      as.geodata(obj=dat.fit, coords.col=6:7, data.col=2, covar.col = c(3,5))
+      as.geodata(obj=dat.fit, coords.col=c("x", "y"), data.col="sqrt_peat_depth", covar.col = c("elev", "slope"))
                  #coords.col=1:2, data.col=11, covar.col= covars)
      # Jitter anyduplicated data locations which appear to be identical
     test.sp <- jitterDupCoords(test.sp, max=2)
@@ -694,8 +701,7 @@ ifelse(file.exists("../outputs/metrics_combined.csv"),
 
 ```{r}
 residuals <- residuals(mod.lm.test)
-resid.sp <- as.geodata(obj=dat, coords.col=6:7, data.col=8,
-                       covar.col= c(3,5))
+resid.sp <- as.geodata(obj=dat.fit, coords.col=c("x", "y"), data.col="sqrt_peat_depth", covar.col = c("elev", "slope"))
 #resid.sp <- jitterDupCoords(resid.sp, max=0.01)
 vari1 <- variog(resid.sp)
 vari1.mc <- variog.mc.env(resid.sp, obj.variog=vari1)
