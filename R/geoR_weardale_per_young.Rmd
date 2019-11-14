@@ -39,11 +39,11 @@ rundate <- paste0("run_", format(Sys.time(), format = "%Y%m%d-%H%M"))
 ```{r}
   #Import observations----
 data_nogpr.shp <- sf::st_read("../data/weardale/upper_weardale_noGPR.shp")
-data_gpr.shp <- sf::st_read("../data/weardale/upper_weardale_GPRselected.shp")
+#data_gpr.shp <- sf::st_read("../data/weardale/upper_weardale_GPRselected.shp")
 
 data_nogpr.shp$GPR <- 0
-data_gpr.shp$GPR <- 1
-data.shp <- rbind(data_nogpr.shp, data_gpr.shp)
+#data_gpr.shp$GPR <- 1
+data.shp <- rbind(data_nogpr.shp)#, data_gpr.shp)
 
 data <- data.frame(data.shp)
 coords <- st_coordinates(data.shp)
