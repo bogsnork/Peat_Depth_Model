@@ -38,12 +38,14 @@ rundate <- paste0("run_", format(Sys.time(), format = "%Y%m%d-%H%M"))
 
 ```{r}
   #Import observations----
-data_nogpr.shp <- sf::st_read("../data/weardale/upper_weardale_noGPR.shp")
-#data_gpr.shp <- sf::st_read("../data/weardale/upper_weardale_GPRselected.shp")
+#data_nogpr.shp <- sf::st_read("../data/weardale/upper_weardale_noGPR.shp")
+data_gpr.shp <- sf::st_read("../data/weardale/upper_weardale_GPRselected.shp")
 
-data_nogpr.shp$GPR <- 0
-#data_gpr.shp$GPR <- 1
-data.shp <- rbind(data_nogpr.shp)#, data_gpr.shp)
+#data_nogpr.shp$GPR <- 0
+data_gpr.shp$GPR <- 1
+data.shp <- rbind(
+  #data_nogpr.shp)#, 
+  data_gpr.shp)
 
 data <- data.frame(data.shp)
 coords <- st_coordinates(data.shp)
@@ -312,7 +314,7 @@ lines(model.geo.exp, col = "red")
 #chosen model
 model.geo <- likfit(geodata=sp_depth, trend = ~sp_depth$covariate$elev+sp_depth$covariate$slope,
                     ini.cov.pars=c(4, 800), fix.nugget=FALSE,
-                    cov.model="exponential")
+                    cov.model="spherical")
 summary(model.geo)
 write_rds(model.geo, path = paste0("../outputs/model.geo_", rundate, ".rds"))
 ```
@@ -409,10 +411,20 @@ for(r in 1:nreps) {
 
     # For all data
     # To allow for changes in number of rows in dat
-    split.matrix <-
-      data.frame(sites=data.order,
-        group = c(kronecker(1:split_m_size, rep(1,split_m_G1)),
-                kronecker((split_m_size + 1):10, rep(1,split_m_G2))))
+
+            #I think this bit of code breaks when n is divisible by 10, hence test first if n/10 is a whole number:   
+    ifelse(test = (abs((n/10) - round((n/10))) != 0), 
+           yes = split.matrix <-
+             data.frame(sites=data.order,
+                        group = c(kronecker(1:split_m_size, rep(1,split_m_G1)),
+                                  kronecker((split_m_size + 1):10, rep(1,split_m_G2)))), 
+           no= split.matrix <-
+             data.frame(sites=data.order,
+                        group = kronecker((split_m_size + 1):10, rep(1,split_m_G2)))
+           )
+    
+    
+    
      # here column 1 is the row numbers and column 2 is the group number
     #  # Check each group has 2 Soil types
     # types <- rep(NA,10)
@@ -488,8 +500,6 @@ for(r in 1:nreps) {
     }
   }
 }
-
-rundate <- paste0("run_", format(Sys.time(), format = "%Y%m%d-%H%M"))
 
 ```
 
